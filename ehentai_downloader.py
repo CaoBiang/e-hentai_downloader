@@ -89,6 +89,47 @@ class EHentaiDownloader:
         # 添加图片状态跟踪
         self.image_status = {}
 
+    def is_content_warning_page(self, html):
+        """
+        检查是否为内容警告页面
+        :param html: 页面HTML内容
+        :return: 如果是内容警告页面返回True，否则返回False
+        """
+        # 检查页面是否包含内容警告的关键词
+        warning_indicators = [
+            "Content Warning",
+            "This gallery has been flagged as",
+            "Offensive For Everyone",
+            "should not be viewed by anyone"
+        ]
+
+        for indicator in warning_indicators:
+            if indicator in html:
+                return True
+        return False
+
+    def get_actual_gallery_url(self, html):
+        """
+        从内容警告页面提取实际的画廊URL
+        :param html: 内容警告页面的HTML内容
+        :return: 实际的画廊URL，如果提取失败返回None
+        """
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # 查找包含"View Gallery"文本的链接
+        view_gallery_link = soup.find('a', string='View Gallery')
+        if view_gallery_link and 'href' in view_gallery_link.attrs:
+            return view_gallery_link['href']
+
+        # 备用方法：通过正则表达式查找带有?nw=session的链接
+        pattern = r'href="([^"]*\?nw=session[^"]*)"'
+        match = re.search(pattern, html)
+        if match:
+            return match.group(1)
+
+        # 如果都没找到，返回None
+        return None
+
     def download_gallery(self):
         """
         下载整个画廊
@@ -97,6 +138,19 @@ class EHentaiDownloader:
             # 获取画廊页面
             logger.info(f"正在获取画廊信息: {self.gallery_url}")
             gallery_html = self.session.get(self.gallery_url).text
+
+            # 检查是否遇到内容警告页面
+            if self.is_content_warning_page(gallery_html):
+                logger.info("检测到内容警告页面，正在自动跳过...")
+                actual_gallery_url = self.get_actual_gallery_url(gallery_html)
+                if actual_gallery_url:
+                    logger.info(f"获取到实际画廊URL: {actual_gallery_url}")
+                    gallery_html = self.session.get(actual_gallery_url).text
+                    # 更新URL为实际的画廊URL
+                    self.gallery_url = actual_gallery_url
+                else:
+                    raise Exception("无法从内容警告页面提取实际画廊URL")
+
             soup = BeautifulSoup(gallery_html, 'html.parser')
 
             # 获取画廊标题
@@ -242,10 +296,22 @@ class EHentaiDownloader:
 
                         # 获取剩余页面的图片链接（从第2页开始，因为第1页已经处理过）
                         for page_num in range(1, last_page_num + 1):
-                            page_url = f"{self.gallery_url}{'&' if '?' in self.gallery_url else '?'}p={page_num}"
+                            # 正确处理URL参数
+                            if '?' in self.gallery_url:
+                                if '&p=' in self.gallery_url:
+                                    # 如果URL中已经有p参数，替换它
+                                    page_url = re.sub(r'&p=\d+', f'&p={page_num}', self.gallery_url)
+                                else:
+                                    # 如果URL中有其他参数但没有p参数，添加p参数
+                                    page_url = f"{self.gallery_url}&p={page_num}"
+                            else:
+                                # 如果URL中没有任何参数，添加p参数
+                                page_url = f"{self.gallery_url}?p={page_num}"
+
                             logger.info(f"获取第 {page_num + 1} 页的图片链接: {page_url}")
 
                             try:
+                                page_url = page_url.replace("nw=session&", '')
                                 page_html = self.session.get(page_url).text
                                 page_links = re.findall(pattern, page_html)
                                 image_page_links.extend(page_links)
@@ -257,8 +323,9 @@ class EHentaiDownloader:
                 logger.info("画廊只有一页")
 
         # 去除重复链接
+        logger.info(f"去重前共找到 {len(image_page_links)} 张图片链接")
         image_page_links = list(dict.fromkeys(image_page_links))
-        logger.info(f"总共找到 {len(image_page_links)} 张图片链接")
+        logger.info(f"去重后共找到 {len(image_page_links)} 张图片链接")
 
         return image_page_links
 
@@ -426,18 +493,18 @@ def main():
         # 交互模式
         mode = input("选择模式 (1: 单个画廊下载, 2: 批量下载, 3: 从INI文件继续下载): ")
         if mode == "1":
-            url = input("请输入画廊URL: ").replace('"','')
+            url = input("请输入画廊URL: ").replace('"', '')
             output = None
             delay = 1
             downloader = EHentaiDownloader(url, output, delay)
             downloader.download_gallery()
         elif mode == "2":
-            file_path = input("请输入包含画廊URL的文件路径: ").replace('"','')
+            file_path = input("请输入包含画廊URL的文件路径: ").replace('"', '')
             output = None
             delay = 1
             batch_download(file_path, output, delay)
         elif mode == "3":
-            ini_path = input("请输入任务信息INI文件路径: ").replace('"','')
+            ini_path = input("请输入任务信息INI文件路径: ").replace('"', '')
             delay = 1
             resume_download_from_ini(ini_path, delay)
         else:
@@ -447,7 +514,7 @@ def main():
 def resume_download_from_ini(ini_path, delay=1):
     """
     从INI文件中读取失败的下载项并重新下载
-    
+
     :param ini_path: 任务信息INI文件路径
     :param delay: 请求间隔时间（秒）
     """
